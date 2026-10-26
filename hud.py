@@ -605,18 +605,41 @@ def _render_racing(now_mps, min_mps, max_mps, sec, nofix, unit):
 
 # --------------------------------------------------------------- dispatcher
 
-def render(now_mps, min_mps, max_mps, sec, nofix=False, big_only=False,
-           unit="mph", style="classic", scale=1.0, opacity=1.0,
-           position="bottom-right", center=None):
+def _render_native(now_mps, min_mps, max_mps, sec, nofix, unit, style):
     style = (style or "classic").lower()
     if style == "gauge":
-        img = _render_gauge(now_mps, min_mps, max_mps, sec, nofix, unit)
-    elif style == "strip":
-        img = _render_strip(now_mps, min_mps, max_mps, sec, nofix, unit)
-    elif style == "minimal":
-        img = _render_minimal(now_mps, min_mps, max_mps, sec, nofix, unit)
-    elif style == "racing":
-        img = _render_racing(now_mps, min_mps, max_mps, sec, nofix, unit)
-    else:
-        img = _render_classic(now_mps, min_mps, max_mps, sec, nofix, unit)
+        return _render_gauge(now_mps, min_mps, max_mps, sec, nofix, unit)
+    if style == "strip":
+        return _render_strip(now_mps, min_mps, max_mps, sec, nofix, unit)
+    if style == "minimal":
+        return _render_minimal(now_mps, min_mps, max_mps, sec, nofix, unit)
+    if style == "racing":
+        return _render_racing(now_mps, min_mps, max_mps, sec, nofix, unit)
+    return _render_classic(now_mps, min_mps, max_mps, sec, nofix, unit)
+
+
+@lru_cache(maxsize=16)
+def _render_native_cached(now_mps, min_mps, max_mps, sec, nofix, unit, style):
+    return _render_native(now_mps, min_mps, max_mps, sec, nofix, unit, style)
+
+
+def render_native(now_mps, min_mps, max_mps, sec, nofix=False, unit="mph",
+                  style="classic", cache=True):
+    """Untransformed style render (1920x1080 RGBA).
+
+    ``cache=True`` is for the GUI preview, whose sample values/style/unit are
+    stable. The burn uses cache=False because every second has new values.
+    """
+    style = (style or "classic").lower()
+    if cache:
+        return _render_native_cached(now_mps, min_mps, max_mps, sec,
+                                     bool(nofix), unit, style)
+    return _render_native(now_mps, min_mps, max_mps, sec, nofix, unit, style)
+
+
+def render(now_mps, min_mps, max_mps, sec, nofix=False, big_only=False,
+           unit="mph", style="classic", scale=1.0, opacity=1.0,
+           position="bottom-right", center=None, cache=False):
+    img = render_native(now_mps, min_mps, max_mps, sec, nofix=nofix,
+                        unit=unit, style=style, cache=cache)
     return _apply_transform(img, scale, opacity, position, center)

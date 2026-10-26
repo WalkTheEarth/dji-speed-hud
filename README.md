@@ -32,6 +32,9 @@ handle (or use the size slider) to resize.
 - Four window themes: Carbon, Midnight, Paper, Rally.
 - HiDPI-aware UI with manual UI scale control.
 - Free HUD placement and resizing by direct manipulation in the preview.
+- Cached preview compositing — dragging/resizing stays responsive even at 180% UI scale.
+- Optional **Fast burn** (ultrafast / CRF 23). Roughly 1.5× faster than the
+  balanced preset, at the cost of a noticeably larger MP4.
 - Cancellable burn with progress, log, and configurable intermediate files.
 - Windows, macOS, and Linux launchers.
 
@@ -97,7 +100,8 @@ file is double-clickable after `chmod +x run_gui.command`.
 2. Pick a **HUD style** and **primary unit**, then drag the HUD in the preview to
    place it. Drag the corner handle or use the **HUD size** slider to resize, and
    set **Opacity** to taste. **Reset HUD** restores the defaults.
-3. Choose the output path and press **Start burn**.
+3. Choose the output path. Toggle **Fast burn** if encode time matters more than
+   file size, then press **Start burn**.
 4. The result is an MP4 with H.264 video (CRF 20), the HUD baked in, and the
    source audio copied when the container supports it.
 
@@ -112,6 +116,8 @@ Keyboard: `Ctrl+O` open, `Ctrl+Enter` start, `Ctrl+=` / `Ctrl+-` UI scale.
   rejected with a clear message.
 - Designed for 16:9 footage. The HUD is rendered as a 1920×1080 overlay and
   scaled to the source width at burn time.
+- The burn is decode-bound (10-bit HEVC), so `Fast burn` mainly trades file size
+  for encoder time; the balanced default is CRF 20.
 - The app is fully local; nothing is uploaded.
 - Linux is the primary tested platform. Windows/macOS paths, fonts, launchers,
   and FFmpeg discovery are implemented, but those builds have not been run on

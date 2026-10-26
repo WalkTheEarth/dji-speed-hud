@@ -566,6 +566,8 @@ def burn(
     progress: Optional[ProgressFn] = None,
     cancelled: Optional[CancelFn] = None,
     log: Optional[LogFn] = None,
+    preset: str = "veryfast",
+    crf: int = 20,
 ) -> Path:
     """Overlay the 1 fps PNG frames on the source and encode the result."""
     frames_dir = Path(frames_dir)
@@ -591,8 +593,8 @@ def burn(
         else:
             cmd += ["-c:a", "aac", "-b:a", "192k"]
     cmd += [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high",
-        "-movflags", "+faststart",
+        "-c:v", "libx264", "-preset", preset, "-crf", str(crf),
+        "-profile:v", "high", "-movflags", "+faststart",
         "-metadata", "comment=speed HUD: current/min/max from DJI GPS telemetry",
         str(part),
     ]
@@ -665,6 +667,8 @@ def run_pipeline(
     hud_opacity: float = 1.0,
     hud_position: str = "bottom-right",
     hud_center: Optional[tuple[float, float]] = None,
+    encode_preset: str = "veryfast",
+    encode_crf: int = 20,
     keep_intermediates: bool = True,
     progress: Optional[ProgressFn] = None,
     cancelled: Optional[CancelFn] = None,
@@ -717,7 +721,8 @@ def run_pipeline(
         hud_center=hud_center, progress=progress, cancelled=cancelled,
     )
     _check_cancel(cancelled)
-    burn(info, frames_dir, output_path, progress, cancelled, log)
+    burn(info, frames_dir, output_path, progress, cancelled, log,
+         preset=encode_preset, crf=encode_crf)
 
     if not keep_intermediates:
         shutil.rmtree(work_dir, ignore_errors=True)

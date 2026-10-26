@@ -604,6 +604,9 @@ class SpeedHudApp:
         self.preview_w = self.px(PREVIEW_W)
         self.preview_h = self.px(PREVIEW_H)
         self._preview_photo = None
+        self._preview_bg_key = None
+        self._preview_bg_img = None
+        self._preview_inner = None
         self._logo_photo = None
         self.probe_message = "Waiting for a file…"
         self.probe_kind = "muted"
@@ -639,6 +642,7 @@ class SpeedHudApp:
         self._editor_dirty = False
         self._cursor = "arrow"
         self.keep_var = tk.BooleanVar(value=bool(settings.get("keep", True)))
+        self.fast_burn_var = tk.BooleanVar(value=bool(settings.get("fast_burn", False)))
         self.status_var = tk.StringVar(value="Choose a DJI video to begin.")
         self.stage_var = tk.StringVar(value="Ready")
         self.detail_var = tk.StringVar(value="")
@@ -743,6 +747,7 @@ class SpeedHudApp:
             "hud_cx": round(self.hud_cx, 4),
             "hud_cy": round(self.hud_cy, 4),
             "keep": bool(self.keep_var.get()),
+            "fast_burn": bool(self.fast_burn_var.get()),
             "ui_scale": round(self.ui_scale, 2),
         })
 
@@ -816,6 +821,10 @@ class SpeedHudApp:
         px = self.px
         self.preview_w = px(PREVIEW_W)
         self.preview_h = px(PREVIEW_H)
+        self._preview_photo = None
+        self._preview_bg_key = None
+        self._preview_bg_img = None
+        self._preview_inner = None
 
         self.root.configure(bg=t["bg"])
         for child in self.root.winfo_children():
@@ -963,10 +972,10 @@ class SpeedHudApp:
         self._section(recipe, "Burn settings").pack(anchor="w")
         recipe_chips = tk.Frame(recipe, bg=t["card"])
         recipe_chips.pack(anchor="w", pady=(px(7), 0), fill="x")
-        for text in ("H.264", "CRF 20", "Audio copy", "MP4"):
+        for text in ("H.264", "Audio copy", "MP4"):
             Chip(recipe_chips, text, theme=t, font=(t["font_mono"], 8),
                  scale=self.ui_scale).pack(side="left", padx=(0, px(5)))
-        tk.Label(recipe, text="1 Hz values · no interpolation",
+        tk.Label(recipe, text="1 Hz HUD · balanced CRF 20 · fast CRF 23",
                  bg=t["card"], fg=t["muted"], font=(t["font_ui"], 8)).pack(
             anchor="w", pady=(px(6), 0))
 
@@ -1074,6 +1083,15 @@ class SpeedHudApp:
                                       radius=t["button_radius"] + px(2),
                                       font=(t["font_ui"], 10))
         self.cancel_btn.pack(side="left", padx=(px(8), 0))
+        fast_box = tk.Frame(actions, bg=t["bg"])
+        fast_box.pack(side="left", padx=(px(24), 0))
+        self.fast_toggle = Toggle(fast_box, self.fast_burn_var.get(),
+                                  self._toggle_fast_burn, theme=t,
+                                  scale=self.ui_scale)
+        self.fast_toggle.pack(side="left")
+        tk.Label(fast_box, text="Fast burn (larger file)", bg=t["bg"],
+                 fg=t["muted"], font=(t["font_ui"], 8)).pack(
+            side="left", padx=(px(8), 0))
         self.open_btn = RoundButton(actions, "Open output folder", self._open_folder,
                                     theme=t, width=px(190), height=px(44),
                                     radius=t["button_radius"] + px(2),
@@ -1165,6 +1183,7 @@ class SpeedHudApp:
     def _show_input_preview(self) -> None:
         if self.preview_kind != "output":
             return
+        self._invalidate_preview_bg()
         if self.input_preview_base is not None:
             self.preview_base = self.input_preview_base
             self.preview_kind = "input"
@@ -1397,6 +1416,10 @@ class SpeedHudApp:
         self.keep_var.set(value)
         self._save_settings()
 
+    def _toggle_fast_burn(self, value: bool) -> None:
+        self.fast_burn_var.set(value)
+        self._save_settings()
+
     # --------------------------------------------------------------- meta
 
     def _refresh_meta(self) -> None:
@@ -1451,7 +1474,7 @@ class SpeedHudApp:
     # ------------------------------------------------------------- preview
 
     def _grab_frame(self, path: Path, at: float) -> Image.Image | None:
-        width = max(900, self.px(900))
+        width = max(900, min(1400, self.px(900)))
         cmd = [
             speedpipe.FFMPEG, "-v", "error", "-ss", f"{max(0.0, at):.3f}",
             "-i", str(path), "-frames:v", "1", "-vf", f"scale={width}:-2",
@@ -1500,6 +1523,44 @@ class SpeedHudApp:
                fill=_rgb(t["accent"]))
         return Image.alpha_composite(img, overlay)
 
+    def _invalidate_preview_bg(self) -> None:
+        self._preview_bg_key = None
+        self._preview_bg_img = None
+        self._preview_inner = None
+
+    def _preview_background(self, base: Image.Image):
+        """Blurred cover + sharp inner frame, built once per base/theme/scale."""
+        px = self.px
+        W, H = self.preview_w, self.preview_h
+        key = (id(base), W, H, self.theme_name, self.ui_scale)
+        if self._preview_bg_key == key and self._preview_bg_img is not None:
+            return self._preview_bg_img, self._preview_inner
+
+        t = self.theme
+        base = base.convert("RGB")
+        dark = (0.2126 * _rgb(t["bg"])[0] + 0.7152 * _rgb(t["bg"])[1]
+                + 0.0722 * _rgb(t["bg"])[2]) / 255.0 < 0.5
+        cover = ImageOps.fit(base, (W, H), method=Image.LANCZOS)
+        cover = cover.filter(ImageFilter.GaussianBlur(max(2, px(18))))
+        cover = ImageEnhance.Brightness(cover).enhance(0.38 if dark else 0.78)
+        scrim = Image.new("RGBA", (W, H),
+                          (0, 0, 0, 55) if dark else (255, 255, 255, 30))
+        canvas = Image.alpha_composite(cover.convert("RGBA"), scrim).convert("RGB")
+
+        inner = ImageOps.contain(base, (W - px(40), H - px(32)),
+                                 method=Image.LANCZOS)
+        x = (W - inner.width) // 2
+        y = (H - inner.height) // 2
+        canvas.paste(inner, (x, y))
+        ImageDraw.Draw(canvas).rectangle(
+            [x, y, x + inner.width - 1, y + inner.height - 1],
+            outline=_rgb(t["preview_border"]), width=max(1, px(1)))
+
+        self._preview_bg_key = key
+        self._preview_bg_img = canvas
+        self._preview_inner = (x, y, inner.width, inner.height)
+        return canvas, self._preview_inner
+
     def _compose_preview(self, base: Image.Image | None, unit: str,
                          kind: str) -> Image.Image:
         t = self.theme
@@ -1510,55 +1571,57 @@ class SpeedHudApp:
                 + 0.0722 * _rgb(t["bg"])[2]) / 255.0 < 0.5
 
         if base is not None:
-            base = base.convert("RGB")
-            cover = ImageOps.fit(base, (W, H), method=Image.LANCZOS)
-            cover = cover.filter(ImageFilter.GaussianBlur(max(2, px(18))))
-            cover = ImageEnhance.Brightness(cover).enhance(0.38 if dark else 0.78)
-            canvas.paste(cover, (0, 0))
-            scrim = Image.new("RGBA", (W, H),
-                              (0, 0, 0, 55) if dark else (255, 255, 255, 30))
-            canvas = Image.alpha_composite(canvas.convert("RGBA"), scrim).convert("RGB")
+            bg, (ix, iy, iw, ih) = self._preview_background(base)
+            canvas = bg.copy()
+            os_ = iw / 1920.0
+            hh = max(1, int(round(1080 * os_)))
+            ox, oy = ix, iy + ih - hh
 
-            inner = ImageOps.contain(base, (W - px(40), H - px(32)),
-                                     method=Image.LANCZOS)
-            x = (W - inner.width) // 2
-            y = (H - inner.height) // 2
-            canvas.paste(inner, (x, y))
-            ImageDraw.Draw(canvas).rectangle(
-                [x, y, x + inner.width - 1, y + inner.height - 1],
-                outline=_rgb(t["preview_border"]), width=max(1, px(1)))
-
+            native = None
+            bbox = None
             if kind != "output":
-                hud_img = hud.render(
+                native = hud.render_native(
                     SAMPLE_NOW, SAMPLE_MIN, SAMPLE_MAX, 0, unit=unit,
-                    style=self.hud_style_var.get(), scale=self.hud_scale,
-                    opacity=self.hud_opacity,
-                    center=(self.hud_cx, self.hud_cy))
-                os_ = inner.width / hud_img.width
-                hh = max(1, int(round(hud_img.height * os_)))
-                hud_scaled = hud_img.resize((inner.width, hh), Image.LANCZOS)
-                ox, oy = x, y + inner.height - hh
-                canvas.paste(hud_scaled, (ox, oy), hud_scaled)
-                bbox = hud_img.getbbox()
+                    style=self.hud_style_var.get(), cache=True)
+                bbox = native.getbbox()
+
+            if bbox is not None:
+                content = native.crop(bbox)
+                fit = min(1920.0 / content.width, 1080.0 / content.height)
+                factor = min(self.hud_scale, fit)
+                cw = content.width * factor
+                ch = content.height * factor
+                xo = self.hud_cx * 1920.0 - cw / 2.0
+                yo = self.hud_cy * 1080.0 - ch / 2.0
+                xo = max(0.0, min(1920.0 - cw, xo))
+                yo = max(0.0, min(1080.0 - ch, yo))
+                pw_ = max(1, int(round(cw * os_)))
+                ph_ = max(1, int(round(ch * os_)))
+                if (pw_, ph_) != content.size:
+                    content = content.resize((pw_, ph_), Image.LANCZOS)
+                if self.hud_opacity < 0.999:
+                    content.putalpha(
+                        content.getchannel("A").point(
+                            lambda a: int(round(a * self.hud_opacity))))
+                px_ = int(round(ox + xo * os_))
+                py_ = int(round(oy + yo * os_))
+                canvas.paste(content, (px_, py_), content)
                 self._hud_overlay_scale = os_
                 self._hud_overlay_origin = (ox, oy)
-                self._hud_bbox_overlay = bbox
-                if bbox and kind == "input":
-                    bx1 = ox + bbox[0] * os_
-                    by1 = oy + bbox[1] * os_
-                    bx2 = ox + bbox[2] * os_
-                    by2 = oy + bbox[3] * os_
+                self._hud_bbox_overlay = (
+                    int(round(xo)), int(round(yo)),
+                    int(round(xo + cw)), int(round(yo + ch)))
+                if kind == "input":
                     self._hud_bbox_preview = (
-                        int(round(bx1)), int(round(by1)),
-                        int(round(bx2)), int(round(by2)))
+                        px_, py_, px_ + pw_, py_ + ph_)
                     self._draw_editor(canvas, self._hud_bbox_preview)
                 else:
                     self._hud_bbox_preview = None
             else:
                 self._hud_bbox_preview = None
                 self._hud_bbox_overlay = None
-                self._hud_overlay_scale = None
-                self._hud_overlay_origin = None
+                self._hud_overlay_scale = os_
+                self._hud_overlay_origin = (ox, oy)
             tag = "OUTPUT" if kind == "output" else "PREVIEW"
         else:
             d = ImageDraw.Draw(canvas)
@@ -1571,7 +1634,10 @@ class SpeedHudApp:
                 d.line([(xx, 0), (xx, H)], fill=grid)
             for yy in range(0, H, step):
                 d.line([(0, yy), (W, yy)], fill=grid)
-            if kind == "unavailable":
+            if kind == "loading":
+                title, sub, tag = ("LOADING PREVIEW",
+                                   "Reading a frame from the clip…", "PREVIEW")
+            elif kind == "unavailable":
                 title, sub, tag = ("PREVIEW UNAVAILABLE",
                                    "The clip is ready to burn.", "NO PREVIEW")
             else:
@@ -1592,7 +1658,7 @@ class SpeedHudApp:
                 SAMPLE_NOW, SAMPLE_MIN, SAMPLE_MAX, 0, unit=unit,
                 style=self.hud_style_var.get(), scale=self.hud_scale,
                 opacity=self.hud_opacity,
-                center=(self.hud_cx, self.hud_cy))
+                center=(self.hud_cx, self.hud_cy), cache=True)
             scale = (W - px(60)) / hud_img.width
             hud_scaled = hud_img.resize(
                 (max(1, int(hud_img.width * scale)),
@@ -1609,13 +1675,23 @@ class SpeedHudApp:
         try:
             img = self._compose_preview(self.preview_base, self.unit_var.get(),
                                         self.preview_kind)
-            self._preview_photo = ImageTk.PhotoImage(img)
-            self.preview_label.configure(image=self._preview_photo)
+            if self._preview_photo is None:
+                self._preview_photo = ImageTk.PhotoImage(img)
+                self.preview_label.configure(image=self._preview_photo)
+            else:
+                try:
+                    self._preview_photo.paste(img)
+                    self.preview_label.configure(image=self._preview_photo)
+                except Exception:
+                    self._preview_photo = ImageTk.PhotoImage(img)
+                    self.preview_label.configure(image=self._preview_photo)
         except Exception:
             self._preview_photo = None
 
         if self.preview_kind == "output":
             self.preview_caption_var.set("Actual frame from the burned video.")
+        elif self.preview_kind == "loading":
+            self.preview_caption_var.set("Loading preview…")
         elif self.preview_kind == "unavailable":
             self.preview_caption_var.set("Preview unavailable for this clip.")
         elif self.preview_base is not None:
@@ -1683,6 +1759,7 @@ class SpeedHudApp:
         self.preview_base = None
         self.input_preview_base = None
         self.preview_kind = "none"
+        self._invalidate_preview_bg()
         self.preview_name_var.set("No video selected")
         self.probe_message = "Waiting for the file…"
         self.probe_kind = "muted"
@@ -1733,29 +1810,47 @@ class SpeedHudApp:
         except Exception as exc:
             self.queue.put(("probe_err", token, str(exc)))
             return
+        # Enable the app as soon as metadata is known; the preview still is
+        # extracted in this worker and arrives as a second message.
+        self.queue.put(("probe_ok", token, info, None, True))
         preview = None
         try:
             at = min(max(info.duration * 0.08, 0.3), max(0.3, info.duration - 0.2))
             preview = self._grab_frame(Path(path), at)
         except Exception:
             preview = None
-        self.queue.put(("probe_ok", token, info, preview))
+        self.queue.put(("probe_preview", token, preview))
 
     def _probe_ok(self, token: int, info: speedpipe.VideoInfo,
-                  preview: Image.Image | None) -> None:
+                  preview: Image.Image | None, pending: bool = False) -> None:
         if token != self.probe_token:
             return
         self.video_info = info
         self.probe_message = ""
         self.probe_kind = "muted"
-        self.input_preview_base = preview
-        self.preview_base = preview
-        self.preview_kind = "input" if preview is not None else "unavailable"
+        if pending:
+            self.input_preview_base = None
+            self.preview_base = None
+            self.preview_kind = "loading"
+        else:
+            self.input_preview_base = preview
+            self.preview_base = preview
+            self.preview_kind = "input" if preview is not None else "unavailable"
+        self._invalidate_preview_bg()
         self.preview_name_var.set(info.path.name)
         self._refresh_meta()
         self._render_preview()
         self._set_status("Ready to burn.", "ok")
         self._sync_controls()
+
+    def _probe_preview(self, token: int, preview: Image.Image | None) -> None:
+        if token != self.probe_token:
+            return
+        self.input_preview_base = preview
+        self.preview_base = preview
+        self.preview_kind = "input" if preview is not None else "unavailable"
+        self._invalidate_preview_bg()
+        self._render_preview()
 
     def _probe_err(self, token: int, message: str) -> None:
         if token != self.probe_token:
@@ -1765,6 +1860,7 @@ class SpeedHudApp:
         self.preview_base = None
         self.input_preview_base = None
         self.preview_kind = "none"
+        self._invalidate_preview_bg()
         self.preview_name_var.set("No video selected")
         self.probe_message = first
         self.probe_kind = "err"
@@ -1827,6 +1923,7 @@ class SpeedHudApp:
         self.opacity_slider.set_enabled(not busy)
         self.reset_btn.set_enabled(not busy)
         self.keep_toggle.set_enabled(not busy)
+        self.fast_toggle.set_enabled(not busy)
         self.clear_btn.set_enabled(not busy)
         self.ui_minus.set_enabled(not busy)
         self.ui_plus.set_enabled(not busy)
@@ -1886,14 +1983,17 @@ class SpeedHudApp:
             target=self._pipeline_worker,
             args=(self.video_info, output, self.unit_var.get(),
                   self.hud_style_var.get(), self.hud_scale, self.hud_opacity,
-                  (self.hud_cx, self.hud_cy), bool(self.keep_var.get()),
-                  self.cancel_event),
+                  (self.hud_cx, self.hud_cy),
+                  "ultrafast" if self.fast_burn_var.get() else "veryfast",
+                  23 if self.fast_burn_var.get() else 20,
+                  bool(self.keep_var.get()), self.cancel_event),
             daemon=True,
         ).start()
 
     def _pipeline_worker(self, info, output: Path, unit: str, hud_style: str,
                          hud_scale: float, hud_opacity: float,
-                         hud_center: tuple[float, float], keep: bool,
+                         hud_center: tuple[float, float],
+                         encode_preset: str, encode_crf: int, keep: bool,
                          cancel_event: threading.Event) -> None:
         def progress(stage: str, fraction: float, detail: str) -> None:
             self.queue.put(("progress", stage, fraction, detail))
@@ -1905,7 +2005,8 @@ class SpeedHudApp:
             result = speedpipe.run_pipeline(
                 info.path, output, unit=unit, hud_style=hud_style,
                 hud_scale=hud_scale, hud_opacity=hud_opacity,
-                hud_center=hud_center, keep_intermediates=keep,
+                hud_center=hud_center, encode_preset=encode_preset,
+                encode_crf=encode_crf, keep_intermediates=keep,
                 progress=progress, cancelled=cancel_event.is_set, log=log,
             )
             self.queue.put(("done", result))
@@ -1981,7 +2082,10 @@ class SpeedHudApp:
                 message = self.queue.get_nowait()
                 kind = message[0]
                 if kind == "probe_ok":
-                    self._probe_ok(message[1], message[2], message[3])
+                    self._probe_ok(message[1], message[2], message[3],
+                                   message[4] if len(message) > 4 else False)
+                elif kind == "probe_preview":
+                    self._probe_preview(message[1], message[2])
                 elif kind == "probe_err":
                     self._probe_err(message[1], message[2])
                 elif kind == "progress":
@@ -2000,6 +2104,7 @@ class SpeedHudApp:
                     if token == self.preview_token and frame is not None:
                         self.preview_base = frame
                         self.preview_kind = "output"
+                        self._invalidate_preview_bg()
                         if self._last_output is not None:
                             self.preview_name_var.set(self._last_output.name)
                         self._sync_controls()

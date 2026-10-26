@@ -79,6 +79,8 @@ run_pipeline(
     hud_opacity=1.0,             # 0.3 .. 1.0
     hud_position="bottom-right", # legacy anchor; ignored if hud_center is set
     hud_center=None,             # (cx, cy) normalized 0..1, free placement
+    encode_preset="veryfast",    # "ultrafast" is the GUI Fast burn
+    encode_crf=20,               # Fast burn uses 23
     keep_intermediates=True,
     progress=None, cancelled=None, log=None,
 ) -> PipelineResult
@@ -114,11 +116,15 @@ Stages:
    center (or anchor). Supports progress/cancel.
 6. **Burn** (`burn`): overlay the 1 fps PNG sequence directly on the source with
    `[1:v]scale=VIDEO_WIDTH:-2,fps=24[o];[0:v][o]overlay=W-w:H-h:shortest=1,
-   format=yuv420p[v]`. H.264 `-preset veryfast -crf 20 -profile:v high`,
-   `-movflags +faststart`, audio copied when the codec is MP4-friendly
-   (`aac/mp3/ac3/eac3/alac`), otherwise AAC 192k. Output is written as
-   `<name>.part.mp4` and renamed on success. Cancellation and failures delete the
-   part file; the ffmpeg log is kept on failure and deleted on success.
+   format=yuv420p[v]`. H.264 `preset`/`crf` are parameters, default
+   `veryfast`/`20`; the GUI's Fast burn uses `ultrafast`/`23`. Also
+   `-profile:v high`, `-movflags +faststart`, audio copied when the codec is
+   MP4-friendly (`aac/mp3/ac3/eac3/alac`), otherwise AAC 192k. Output is written
+   as `<name>.part.mp4` and renamed on success. Cancellation and failures delete
+   the part file; the ffmpeg log is kept on failure and deleted on success.
+   Measured on a 20-second 1080p10 HEVC segment: veryfast/crf20 6.9 s / 37 MB,
+   ultrafast/crf23 4.3 s / 56 MB (~1.6× faster, ~1.5× larger). The burn is
+   decode-bound, so hardware/no-hardware tests did not beat libx264 by much.
 
 Gotchas already handled — do not undo:
 
@@ -226,12 +232,24 @@ The old 9-way anchor picker was removed at the user's request because fixed
 anchors were not what they wanted. Do not reintroduce it. The editor works on the
 preview `tk.Label`:
 
-- `_compose_preview` renders the HUD overlay with `center=(hud_cx, hud_cy)`,
-  pastes it onto the preview frame, then stores:
+- `_compose_preview` uses a cached preview background (`_preview_background`:
+  blurred cover + sharp inner frame, keyed by base id/theme/UI scale) and a
+  cached native HUD (`hud.render_native(..., cache=True)`). It then crops the
+  HUD content, scales **only the content** to preview pixels, and pastes it. It
+  stores:
   - `_hud_overlay_scale = inner.width / 1920`
-  - `_hud_overlay_origin = (ox, oy)` where the overlay was pasted
-  - `_hud_bbox_overlay = hud_img.getbbox()`
-  - `_hud_bbox_preview` = the bbox mapped into preview-label coordinates
+  - `_hud_overlay_origin = (ox, oy)` where the overlay would be pasted
+  - `_hud_bbox_overlay` = the content box in 1920×1080 overlay coordinates
+  - `_hud_bbox_preview` = the content box mapped into preview-label coordinates
+- Do not reintroduce the old per-update `ImageOps.fit` + `GaussianBlur` +
+  `ImageOps.contain` + full-overlay resize: that path was ~150 ms per drag frame
+  at 180% UI scale. The cached/content-only path is ~20–30 ms. The background
+  must be invalidated when the base image, theme, or UI scale changes; the
+  native cache is keyed by style/unit/values (GUI sample values are constant).
+- The probe is split: `probe_ok` (metadata) arrives first and enables Start with
+  a `loading` preview state; `probe_preview` arrives after the ffmpeg still
+  extraction. On a 1.4 GB clip this put the usable app at ~0.8 s instead of
+  ~1.6 s.
 - `_draw_editor` draws a dashed accent box + bottom-right handle. It is drawn only
   for a real input preview; the placeholder and output previews show no editor.
 - Drag inside the box to move. Drag the handle to resize. The size slider and
@@ -266,6 +284,7 @@ Schema:
   "hud_cx": 0.8510416667,
   "hud_cy": 0.8074074074,
   "keep": true,
+  "fast_burn": false,
   "ui_scale": 1.8
 }
 ```
@@ -400,6 +419,15 @@ dragging the bottom-right handle. The settings file must then contain
 Burn smoke test: generate a 3-second testsrc with audio, render 4 frames via
 `speedpipe.render_frames(... hud_center=(0.3, 0.3), hud_scale=1.2,
 hud_opacity=0.8)`, burn, and confirm a frame shows the HUD at that position.
+Fast burn uses `preset="ultrafast", crf=23`; verify the output is h264/aac and
+that the GUI passes `encode_preset`/`encode_crf` (a fake `run_pipeline` capture
+is the quickest check).
+
+Preview performance regression check: after the first render, `_render_preview()`
+should average roughly 20–30 ms at UI scale 1.8 with the Bar style at 150%. If it
+is back near 150 ms, the background/native cache or the content-only transform
+was broken; check `_preview_background`, `hud.render_native`, and the base-change
+invalidation calls.
 
 ## 11. Known limitations / TODO
 
@@ -418,6 +446,16 @@ hud_opacity=0.8)`, burn, and confirm a frame shows the HUD at that position.
   both and fix any platform-specific issues (DPI, fonts, ffmpeg PATH).
 - FFmpeg is an external dependency. A packaged `.exe`/`.app` (PyInstaller or
   similar) is not included; the user was told packaging can be added if wanted.
+- Fast burn produces a noticeably larger file (about 1.5× in the benchmark) and
+  slightly lower visual quality at CRF 23. The balanced veryfast/CRF 20 default
+  remains.
+- The burn is decode-bound; a 28-minute 1080p10 HEVC clip takes ~20 minutes with
+  veryfast. Fast burn helps but is not a substitute for a GPU pipeline.
+- The first preview render after a new base image takes ~0.2 s because it builds
+  the blurred background and loads the style; subsequent drag frames are cached.
+- The native HUD cache is `lru_cache(maxsize=16)`; only the GUI uses it
+  (constant sample values), so it stays around 10 entries. The burn uses
+  `cache=False`.
 - Do not add personal media or telemetry to the repo, even in test fixtures.
 
 ## 12. Working rules for successors
