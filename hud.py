@@ -99,8 +99,12 @@ POSITIONS = [
     "bottom-left", "bottom-center", "bottom-right",
 ]
 
+# Center of the native classic panel. Used as the default free-position center.
+DEFAULT_CENTER = (1634.0 / W, 872.0 / H)
 
-def _apply_transform(img, scale=1.0, opacity=1.0, position="bottom-right"):
+
+def _apply_transform(img, scale=1.0, opacity=1.0, position="bottom-right",
+                     center=None):
     """Scale / fade / relocate the rendered HUD inside the 1920x1080 frame."""
     try:
         scale = max(0.05, float(scale))
@@ -113,7 +117,21 @@ def _apply_transform(img, scale=1.0, opacity=1.0, position="bottom-right"):
     if position not in POSITIONS:
         position = "bottom-right"
 
-    native = abs(scale - 1.0) < 1e-3 and position == "bottom-right"
+    free = center is not None
+    if free:
+        try:
+            cx, cy = float(center[0]), float(center[1])
+        except (TypeError, ValueError, IndexError):
+            free = False
+            cx = cy = 0.0
+        else:
+            cx = max(0.0, min(1.0, cx))
+            cy = max(0.0, min(1.0, cy))
+
+    at_default = (not free) or (
+        abs(cx - DEFAULT_CENTER[0]) < 1e-4 and
+        abs(cy - DEFAULT_CENTER[1]) < 1e-4)
+    native = abs(scale - 1.0) < 1e-3 and position == "bottom-right" and at_default
     if native:
         if opacity >= 0.999:
             return img
@@ -125,8 +143,11 @@ def _apply_transform(img, scale=1.0, opacity=1.0, position="bottom-right"):
     if bbox is None:
         return img
     content = img.crop(bbox)
-    fit = min((W - 2 * MARGIN) / content.width,
-              (H - 2 * MARGIN) / content.height)
+    if free:
+        fit = min(W / content.width, H / content.height)
+    else:
+        fit = min((W - 2 * MARGIN) / content.width,
+                  (H - 2 * MARGIN) / content.height)
     factor = min(scale, fit)
     if factor <= 0:
         return img
@@ -139,26 +160,32 @@ def _apply_transform(img, scale=1.0, opacity=1.0, position="bottom-right"):
         content.putalpha(
             content.getchannel("A").point(lambda a: int(round(a * opacity))))
 
-    if position == "center":
-        vertical, horizontal = "middle", "center"
+    if free:
+        x = cx * W - content.width / 2.0
+        y = cy * H - content.height / 2.0
+        x = max(0.0, min(W - content.width, x))
+        y = max(0.0, min(H - content.height, y))
     else:
-        vertical, horizontal = position.split("-", 1)
+        if position == "center":
+            vertical, horizontal = "middle", "center"
+        else:
+            vertical, horizontal = position.split("-", 1)
 
-    if horizontal == "left":
-        x = MARGIN
-    elif horizontal == "center":
-        x = (W - content.width) // 2
-    else:
-        x = W - MARGIN - content.width
-    if vertical == "top":
-        y = MARGIN
-    elif vertical == "middle":
-        y = (H - content.height) // 2
-    else:
-        y = H - MARGIN - content.height
+        if horizontal == "left":
+            x = MARGIN
+        elif horizontal == "center":
+            x = (W - content.width) // 2
+        else:
+            x = W - MARGIN - content.width
+        if vertical == "top":
+            y = MARGIN
+        elif vertical == "middle":
+            y = (H - content.height) // 2
+        else:
+            y = H - MARGIN - content.height
 
     out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    out.paste(content, (int(x), int(y)), content)
+    out.paste(content, (int(round(x)), int(round(y))), content)
     return out
 
 
@@ -237,14 +264,16 @@ _MINIMAL_SCRIM = None
 def _minimal_scrim():
     global _MINIMAL_SCRIM
     if _MINIMAL_SCRIM is None:
-        sw, sh = 1240, 600
+        # Compact soft scrim behind the number, so free drag/resize moves a
+        # predictable box rather than a screen-wide gradient.
+        sw, sh = 660, 430
         small = Image.new("L", (64, 64))
         pix = small.load()
         for y in range(64):
             ay = (y / 63.0) ** 1.5
             for x in range(64):
                 ax = (x / 63.0) ** 1.6
-                pix[x, y] = 2 + int(146 * ax * ay)
+                pix[x, y] = 2 + int(140 * ax * ay)
         alpha = small.resize((sw, sh), Image.BILINEAR)
         scrim = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
         scrim.putalpha(alpha)
@@ -578,7 +607,7 @@ def _render_racing(now_mps, min_mps, max_mps, sec, nofix, unit):
 
 def render(now_mps, min_mps, max_mps, sec, nofix=False, big_only=False,
            unit="mph", style="classic", scale=1.0, opacity=1.0,
-           position="bottom-right"):
+           position="bottom-right", center=None):
     style = (style or "classic").lower()
     if style == "gauge":
         img = _render_gauge(now_mps, min_mps, max_mps, sec, nofix, unit)
@@ -590,4 +619,4 @@ def render(now_mps, min_mps, max_mps, sec, nofix=False, big_only=False,
         img = _render_racing(now_mps, min_mps, max_mps, sec, nofix, unit)
     else:
         img = _render_classic(now_mps, min_mps, max_mps, sec, nofix, unit)
-    return _apply_transform(img, scale, opacity, position)
+    return _apply_transform(img, scale, opacity, position, center)

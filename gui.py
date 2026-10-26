@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import queue
 import subprocess
@@ -37,6 +38,16 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 BASE_W, BASE_H = 1180, 1080
 PREVIEW_W, PREVIEW_H = 620, 349
 SAMPLE_NOW, SAMPLE_MIN, SAMPLE_MAX = 18.0, 3.0, 34.0
+DEFAULT_CENTER = hud.DEFAULT_CENTER
+
+# Centers used only when migrating settings from the old 9-way picker.
+OLD_POSITION_CENTERS = {
+    "top-left": (0.25, 0.25), "top-center": (0.50, 0.20),
+    "top-right": (0.75, 0.25), "middle-left": (0.20, 0.50),
+    "center": (0.50, 0.50), "middle-right": (0.80, 0.50),
+    "bottom-left": (0.20, 0.80), "bottom-center": (0.50, 0.85),
+    "bottom-right": DEFAULT_CENTER,
+}
 
 
 def _settings_path() -> Path:
@@ -552,47 +563,6 @@ class RoundSlider(tk.Canvas):
         self._draw()
 
 
-POSITION_CHOICES = [
-    ("top-left", "↖"), ("top-center", "↑"), ("top-right", "↗"),
-    ("middle-left", "←"), ("center", "•"), ("middle-right", "→"),
-    ("bottom-left", "↙"), ("bottom-center", "↓"), ("bottom-right", "↘"),
-]
-
-
-class PositionPicker(tk.Frame):
-    def __init__(self, parent, value, command, *, theme, scale, bg):
-        super().__init__(parent, bg=bg)
-        self.command = command
-        self.buttons: dict[str, RoundButton] = {}
-        bw = int(round(32 * scale))
-        bh = int(round(20 * scale))
-        gap = int(round(3 * scale))
-        for i, (pid, label) in enumerate(POSITION_CHOICES):
-            btn = RoundButton(
-                self, label, lambda p=pid: self._choose(p), theme=theme,
-                width=bw, height=bh, radius=int(round(6 * scale)),
-                font=(theme["font_ui"], 9, "bold"), bg=bg,
-                selected=(pid == value),
-            )
-            btn.grid(row=i // 3, column=i % 3,
-                     padx=(0 if i % 3 == 0 else gap, 0),
-                     pady=(0 if i // 3 == 0 else gap, 0))
-            self.buttons[pid] = btn
-
-    def _choose(self, pid):
-        self.set_value(pid)
-        if self.command:
-            self.command(pid)
-
-    def set_value(self, value):
-        for pid, btn in self.buttons.items():
-            btn.set_selected(pid == value)
-
-    def set_enabled(self, enabled):
-        for btn in self.buttons.values():
-            btn.set_enabled(enabled)
-
-
 # ---------------------------------------------------------------- the app
 
 class SpeedHudApp:
@@ -649,9 +619,25 @@ class SpeedHudApp:
             value=saved_style if saved_style in valid_styles else "classic")
         self.hud_scale = _as_float(settings.get("hud_scale", 1.0), 1.0, 0.5, 1.5)
         self.hud_opacity = _as_float(settings.get("hud_opacity", 1.0), 1.0, 0.3, 1.0)
-        saved_position = settings.get("hud_position", "bottom-right")
-        self.hud_position = (saved_position if saved_position in hud.POSITIONS
-                             else "bottom-right")
+        if "hud_cx" in settings and "hud_cy" in settings:
+            self.hud_cx = _as_float(settings.get("hud_cx"), DEFAULT_CENTER[0], 0.0, 1.0)
+            self.hud_cy = _as_float(settings.get("hud_cy"), DEFAULT_CENTER[1], 0.0, 1.0)
+        else:
+            legacy = settings.get("hud_position", "bottom-right")
+            self.hud_cx, self.hud_cy = OLD_POSITION_CENTERS.get(legacy, DEFAULT_CENTER)
+        self._hud_bbox_preview = None
+        self._hud_bbox_overlay = None
+        self._hud_overlay_scale = None
+        self._hud_overlay_origin = None
+        self._drag_mode = None
+        self._drag_start = None
+        self._drag_center_start = None
+        self._drag_scale_start = 1.0
+        self._drag_dist_start = 1.0
+        self._drag_half_norm = (0.0, 0.0)
+        self._editor_after = None
+        self._editor_dirty = False
+        self._cursor = "arrow"
         self.keep_var = tk.BooleanVar(value=bool(settings.get("keep", True)))
         self.status_var = tk.StringVar(value="Choose a DJI video to begin.")
         self.stage_var = tk.StringVar(value="Ready")
@@ -754,7 +740,8 @@ class SpeedHudApp:
             "hud_style": self.hud_style_var.get(),
             "hud_scale": round(self.hud_scale, 2),
             "hud_opacity": round(self.hud_opacity, 2),
-            "hud_position": self.hud_position,
+            "hud_cx": round(self.hud_cx, 4),
+            "hud_cy": round(self.hud_cy, 4),
             "keep": bool(self.keep_var.get()),
             "ui_scale": round(self.ui_scale, 2),
         })
@@ -996,8 +983,13 @@ class SpeedHudApp:
                  fg=t["muted"], font=(t["font_mono"], 8), anchor="e").pack(
             side="right", fill="x", expand=True)
         self.preview_label = tk.Label(pv, bg=t["card"], bd=0,
-                                      highlightthickness=0)
+                                      highlightthickness=0, cursor="arrow")
         self.preview_label.grid(row=1, column=0, pady=(px(8), 0))
+        self.preview_label.bind("<Button-1>", self._preview_press)
+        self.preview_label.bind("<B1-Motion>", self._preview_drag)
+        self.preview_label.bind("<ButtonRelease-1>", self._preview_release)
+        self.preview_label.bind("<Motion>", self._preview_hover)
+        self.preview_label.bind("<Leave>", lambda _e: self._set_preview_cursor("arrow"))
         tk.Label(pv, textvariable=self.preview_caption_var, bg=t["card"],
                  fg=t["muted"], font=(t["font_ui"], 8), anchor="w").grid(
             row=2, column=0, sticky="ew", pady=(px(8), 0))
@@ -1058,11 +1050,16 @@ class SpeedHudApp:
 
         pos_box = tk.Frame(crow, bg=t["card"])
         pos_box.grid(row=0, column=2, sticky="w", padx=(px(20), 0))
-        self._section(pos_box, "Placement").pack(anchor="w")
-        self.position_picker = PositionPicker(
-            pos_box, self.hud_position, self._on_hud_position,
-            theme=t, scale=self.ui_scale, bg=t["card"])
-        self.position_picker.pack(anchor="w", pady=(px(6), 0))
+        self._section(pos_box, "Position").pack(anchor="w")
+        tk.Label(pos_box, text="Drag the HUD in the preview to move it; "
+                               "drag the corner handle to resize.",
+                 bg=t["card"], fg=t["muted"], font=(t["font_ui"], 8),
+                 wraplength=px(250), justify="left", anchor="w").pack(
+            anchor="w", pady=(px(6), 0))
+        self.reset_btn = RoundButton(pos_box, "Reset HUD", self._reset_hud,
+                                     theme=t, width=px(100), height=px(26),
+                                     radius=px(8), font=(t["font_ui"], 8, "bold"))
+        self.reset_btn.pack(anchor="w", pady=(px(6), 0))
 
         # ---- action bar
         actions = tk.Frame(outer, bg=t["bg"])
@@ -1221,16 +1218,180 @@ class SpeedHudApp:
         if final:
             self._save_settings()
 
-    def _on_hud_position(self, position: str) -> None:
-        if position not in hud.POSITIONS:
+    def _reset_hud(self) -> None:
+        if self.running:
             return
         self.preview_token += 1
-        self.hud_position = position
-        if hasattr(self, "position_picker"):
-            self.position_picker.set_value(position)
+        self.hud_scale = 1.0
+        self.hud_opacity = 1.0
+        self.hud_cx, self.hud_cy = DEFAULT_CENTER
+        if hasattr(self, "size_slider"):
+            self.size_slider.set_value(self.hud_scale)
+            self.size_value.configure(text="100%")
+        if hasattr(self, "opacity_slider"):
+            self.opacity_slider.set_value(self.hud_opacity)
+            self.opacity_value.configure(text="100%")
         self._show_input_preview()
         self._render_preview()
         self._save_settings()
+
+    # --- preview drag/resize editor
+    def _set_preview_cursor(self, cursor: str) -> None:
+        if cursor != self._cursor:
+            self._cursor = cursor
+            try:
+                self.preview_label.configure(cursor=cursor)
+            except tk.TclError:
+                pass
+
+    def _preview_interactive(self) -> bool:
+        return (not self.running and self.preview_kind == "input"
+                and self.preview_base is not None
+                and self._hud_bbox_preview is not None)
+
+    def _hud_center_preview(self):
+        if self._hud_overlay_origin is not None and self._hud_overlay_scale:
+            ox, oy = self._hud_overlay_origin
+            s = self._hud_overlay_scale
+            return (ox + self.hud_cx * 1920 * s,
+                    oy + self.hud_cy * 1080 * s)
+        box = self._hud_bbox_preview
+        if box:
+            return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+        return (0.0, 0.0)
+
+    def _near_handle(self, x, y) -> bool:
+        box = self._hud_bbox_preview
+        if not box:
+            return False
+        r = self.px(14)
+        return (x - box[2]) ** 2 + (y - box[3]) ** 2 <= r * r
+
+    def _inside_bbox(self, x, y) -> bool:
+        box = self._hud_bbox_preview
+        if not box:
+            return False
+        x1, y1, x2, y2 = box
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def _preview_press(self, event) -> None:
+        if self.running:
+            return
+        if self.preview_kind == "output":
+            self._show_input_preview()
+            self._render_preview()
+        if not self._preview_interactive():
+            return
+        self.preview_token += 1
+        if self._near_handle(event.x, event.y):
+            self._drag_mode = "resize"
+            self._drag_scale_start = self.hud_scale
+            cx, cy = self._hud_center_preview()
+            self._drag_dist_start = max(
+                1.0, math.hypot(event.x - cx, event.y - cy))
+            self._set_preview_cursor("sizing")
+        elif self._inside_bbox(event.x, event.y):
+            self._drag_mode = "move"
+            self._drag_start = (event.x, event.y)
+            self._drag_center_start = (self.hud_cx, self.hud_cy)
+            bbox = self._hud_bbox_overlay
+            if bbox:
+                half_w = (bbox[2] - bbox[0]) / 2.0 / 1920.0
+                half_h = (bbox[3] - bbox[1]) / 2.0 / 1080.0
+            else:
+                half_w = half_h = 0.0
+            self._drag_half_norm = (min(0.5, half_w), min(0.5, half_h))
+            self._set_preview_cursor("fleur")
+        else:
+            self._drag_mode = None
+
+    def _preview_drag(self, event) -> None:
+        if not self._drag_mode:
+            return
+        if self._drag_mode == "move":
+            if not self._drag_start or not self._drag_center_start:
+                return
+            os_ = self._hud_overlay_scale or 1.0
+            dx = (event.x - self._drag_start[0]) / (os_ * 1920.0)
+            dy = (event.y - self._drag_start[1]) / (os_ * 1080.0)
+            cx = self._drag_center_start[0] + dx
+            cy = self._drag_center_start[1] + dy
+            hw, hh = self._drag_half_norm
+            self.hud_cx = 0.5 if hw >= 0.5 else max(hw, min(1.0 - hw, cx))
+            self.hud_cy = 0.5 if hh >= 0.5 else max(hh, min(1.0 - hh, cy))
+        elif self._drag_mode == "resize":
+            cx, cy = self._hud_center_preview()
+            dist = max(1.0, math.hypot(event.x - cx, event.y - cy))
+            new_scale = self._drag_scale_start * dist / self._drag_dist_start
+            self.hud_scale = max(0.5, min(1.5, new_scale))
+            if hasattr(self, "size_slider"):
+                self.size_slider.set_value(self.hud_scale)
+                self.size_value.configure(
+                    text=f"{int(round(self.hud_scale * 100))}%")
+        self._schedule_editor_render()
+
+    def _preview_release(self, event) -> None:
+        if not self._drag_mode:
+            return
+        self._drag_mode = None
+        if self._editor_after is not None:
+            try:
+                self.root.after_cancel(self._editor_after)
+            except tk.TclError:
+                pass
+            self._editor_after = None
+        self._editor_dirty = False
+        self._render_preview()
+        self._save_settings()
+        self._preview_hover(event)
+
+    def _preview_hover(self, event) -> None:
+        if not self._preview_interactive():
+            self._set_preview_cursor("arrow")
+            return
+        if self._near_handle(event.x, event.y):
+            self._set_preview_cursor("sizing")
+        elif self._inside_bbox(event.x, event.y):
+            self._set_preview_cursor("fleur")
+        else:
+            self._set_preview_cursor("arrow")
+
+    def _schedule_editor_render(self) -> None:
+        self._editor_dirty = True
+        if self._editor_after is None:
+            self._editor_after = self.root.after(16, self._editor_tick)
+
+    def _editor_tick(self) -> None:
+        self._editor_after = None
+        if not self._editor_dirty:
+            return
+        self._editor_dirty = False
+        self._render_preview()
+
+    def _dashed_rect(self, draw, box, color, dash, gap, width) -> None:
+        x1, y1, x2, y2 = box
+        step = max(2, dash + gap)
+        for x in range(x1, x2 + 1, step):
+            draw.line([(x, y1), (min(x + dash, x2), y1)], fill=color, width=width)
+            draw.line([(x, y2), (min(x + dash, x2), y2)], fill=color, width=width)
+        for y in range(y1, y2 + 1, step):
+            draw.line([(x1, y), (x1, min(y + dash, y2))], fill=color, width=width)
+            draw.line([(x2, y), (x2, min(y + dash, y2))], fill=color, width=width)
+
+    def _draw_editor(self, canvas, box) -> None:
+        px = self.px
+        draw = ImageDraw.Draw(canvas)
+        accent = _rgb(self.theme["accent"])
+        dash, gap = max(3, px(8)), max(2, px(5))
+        self._dashed_rect(draw, box, (0, 0, 0), dash, gap,
+                          max(1, px(2) + 1))
+        self._dashed_rect(draw, box, accent, dash, gap, max(1, px(2)))
+        hx, hy = box[2], box[3]
+        r = max(3, px(6))
+        draw.ellipse([hx - r - 1, hy - r - 1, hx + r + 1, hy + r + 1],
+                     fill=(0, 0, 0))
+        draw.ellipse([hx - r, hy - r, hx + r, hy + r], fill=accent,
+                     outline=(255, 255, 255), width=max(1, px(1)))
 
     def _toggle_keep(self, value: bool) -> None:
         self.keep_var.set(value)
@@ -1371,11 +1532,33 @@ class SpeedHudApp:
                 hud_img = hud.render(
                     SAMPLE_NOW, SAMPLE_MIN, SAMPLE_MAX, 0, unit=unit,
                     style=self.hud_style_var.get(), scale=self.hud_scale,
-                    opacity=self.hud_opacity, position=self.hud_position)
-                scale = inner.width / hud_img.width
-                hh = max(1, int(round(hud_img.height * scale)))
+                    opacity=self.hud_opacity,
+                    center=(self.hud_cx, self.hud_cy))
+                os_ = inner.width / hud_img.width
+                hh = max(1, int(round(hud_img.height * os_)))
                 hud_scaled = hud_img.resize((inner.width, hh), Image.LANCZOS)
-                canvas.paste(hud_scaled, (x, y + inner.height - hh), hud_scaled)
+                ox, oy = x, y + inner.height - hh
+                canvas.paste(hud_scaled, (ox, oy), hud_scaled)
+                bbox = hud_img.getbbox()
+                self._hud_overlay_scale = os_
+                self._hud_overlay_origin = (ox, oy)
+                self._hud_bbox_overlay = bbox
+                if bbox and kind == "input":
+                    bx1 = ox + bbox[0] * os_
+                    by1 = oy + bbox[1] * os_
+                    bx2 = ox + bbox[2] * os_
+                    by2 = oy + bbox[3] * os_
+                    self._hud_bbox_preview = (
+                        int(round(bx1)), int(round(by1)),
+                        int(round(bx2)), int(round(by2)))
+                    self._draw_editor(canvas, self._hud_bbox_preview)
+                else:
+                    self._hud_bbox_preview = None
+            else:
+                self._hud_bbox_preview = None
+                self._hud_bbox_overlay = None
+                self._hud_overlay_scale = None
+                self._hud_overlay_origin = None
             tag = "OUTPUT" if kind == "output" else "PREVIEW"
         else:
             d = ImageDraw.Draw(canvas)
@@ -1401,10 +1584,15 @@ class SpeedHudApp:
                    font=_pil_font(hud.F_LATO, px(12)), fill=_rgb(t["muted"]))
             d.text((px(24), px(112)), "Preview values are illustrative.",
                    font=_pil_font(hud.F_LATO, px(11)), fill=_rgb(t["muted"]))
+            self._hud_bbox_preview = None
+            self._hud_bbox_overlay = None
+            self._hud_overlay_scale = None
+            self._hud_overlay_origin = None
             hud_img = hud.render(
                 SAMPLE_NOW, SAMPLE_MIN, SAMPLE_MAX, 0, unit=unit,
                 style=self.hud_style_var.get(), scale=self.hud_scale,
-                opacity=self.hud_opacity, position=self.hud_position)
+                opacity=self.hud_opacity,
+                center=(self.hud_cx, self.hud_cy))
             scale = (W - px(60)) / hud_img.width
             hud_scaled = hud_img.resize(
                 (max(1, int(hud_img.width * scale)),
@@ -1432,7 +1620,7 @@ class SpeedHudApp:
             self.preview_caption_var.set("Preview unavailable for this clip.")
         elif self.preview_base is not None:
             self.preview_caption_var.set(
-                "HUD preview · 1 Hz · size/opacity/placement applied.")
+                "HUD preview · drag to move · corner handle to resize.")
         else:
             self.preview_caption_var.set("Choose a DJI clip to see the HUD preview.")
 
@@ -1637,7 +1825,7 @@ class SpeedHudApp:
             btn.set_enabled(not busy)
         self.size_slider.set_enabled(not busy)
         self.opacity_slider.set_enabled(not busy)
-        self.position_picker.set_enabled(not busy)
+        self.reset_btn.set_enabled(not busy)
         self.keep_toggle.set_enabled(not busy)
         self.clear_btn.set_enabled(not busy)
         self.ui_minus.set_enabled(not busy)
@@ -1698,14 +1886,14 @@ class SpeedHudApp:
             target=self._pipeline_worker,
             args=(self.video_info, output, self.unit_var.get(),
                   self.hud_style_var.get(), self.hud_scale, self.hud_opacity,
-                  self.hud_position, bool(self.keep_var.get()),
+                  (self.hud_cx, self.hud_cy), bool(self.keep_var.get()),
                   self.cancel_event),
             daemon=True,
         ).start()
 
     def _pipeline_worker(self, info, output: Path, unit: str, hud_style: str,
                          hud_scale: float, hud_opacity: float,
-                         hud_position: str, keep: bool,
+                         hud_center: tuple[float, float], keep: bool,
                          cancel_event: threading.Event) -> None:
         def progress(stage: str, fraction: float, detail: str) -> None:
             self.queue.put(("progress", stage, fraction, detail))
@@ -1717,7 +1905,7 @@ class SpeedHudApp:
             result = speedpipe.run_pipeline(
                 info.path, output, unit=unit, hud_style=hud_style,
                 hud_scale=hud_scale, hud_opacity=hud_opacity,
-                hud_position=hud_position, keep_intermediates=keep,
+                hud_center=hud_center, keep_intermediates=keep,
                 progress=progress, cancelled=cancel_event.is_set, log=log,
             )
             self.queue.put(("done", result))

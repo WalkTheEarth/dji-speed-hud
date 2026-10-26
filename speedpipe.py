@@ -522,6 +522,7 @@ def render_frames(
     hud_scale: float = 1.0,
     hud_opacity: float = 1.0,
     hud_position: str = "bottom-right",
+    hud_center: Optional[tuple[float, float]] = None,
     progress: Optional[ProgressFn] = None,
     cancelled: Optional[CancelFn] = None,
 ) -> int:
@@ -546,6 +547,7 @@ def render_frames(
             scale=hud_scale,
             opacity=hud_opacity,
             position=hud_position,
+            center=hud_center,
         )
         image.save(frames_dir / f"f_{i:05d}.png")
         if progress and ((i + 1) % 8 == 0 or i + 1 == total):
@@ -662,6 +664,7 @@ def run_pipeline(
     hud_scale: float = 1.0,
     hud_opacity: float = 1.0,
     hud_position: str = "bottom-right",
+    hud_center: Optional[tuple[float, float]] = None,
     keep_intermediates: bool = True,
     progress: Optional[ProgressFn] = None,
     cancelled: Optional[CancelFn] = None,
@@ -707,9 +710,12 @@ def run_pipeline(
         telemetry_csv, speed_csv, info.duration, progress, cancelled, log
     )
     _check_cancel(cancelled)
-    frames = render_frames(filled, running_min, running_max, frames_dir, unit,
-                           hud_style, hud_scale, hud_opacity, hud_position,
-                           progress, cancelled)
+    frames = render_frames(
+        filled, running_min, running_max, frames_dir,
+        unit=unit, hud_style=hud_style, hud_scale=hud_scale,
+        hud_opacity=hud_opacity, hud_position=hud_position,
+        hud_center=hud_center, progress=progress, cancelled=cancelled,
+    )
     _check_cancel(cancelled)
     burn(info, frames_dir, output_path, progress, cancelled, log)
 
