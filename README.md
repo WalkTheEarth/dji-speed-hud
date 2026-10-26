@@ -51,6 +51,20 @@ python3 -m venv venv
 ./run_gui.sh
 ```
 
+For a desktop-menu entry, create `~/.local/share/applications/speed-hud.desktop`
+with the absolute paths on your machine:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Speed HUD
+Comment=DJI telemetry speedometer overlay
+Exec=/absolute/path/to/run_gui.sh
+Icon=/absolute/path/to/speedometer.png
+Terminal=false
+Categories=AudioVideo;Video;
+```
+
 ### Windows
 
 1. Install Python from <https://python.org> (the installer includes Tkinter).
