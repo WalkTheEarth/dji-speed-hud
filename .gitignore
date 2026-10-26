@@ -1,0 +1,38 @@
+# local environment
+venv/
+__pycache__/
+*.py[cod]
+*.log
+
+# personal media and derived project data
+*.mp4
+*.mov
+*.MP4
+frames/
+checks/
+explore/
+telemetry.csv
+speed_1hz.csv
+djmd_pkts.csv
+DJI_*_drive.gpx
+speed_overlay_alpha.mov
+speed_hud_full.mp4
+RESUME.md
+
+# local-only files
+speedometer.desktop
+settings.json
+__pycache__/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# one-off scripts kept locally for this project, not part of the public tool
+an3.py
+dump.py
+mk_gpx.py
+render_frames.py
+burn_only.sh
+burn_full.sh
+finish.sh
